@@ -4,6 +4,8 @@
 
 ![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)
 
+Поддержать меня можно на Boosty: https://boosty.to/triangle_black/
+
 ![screenshot](promo.png)
 
 Настольное приложение для заметок в стиле Telegram Desktop на **PySide6 / Qt 6**
