@@ -86,6 +86,26 @@ def is_trusted(device_id: str) -> bool:
     return get_peer(device_id) is not None
 
 
+def update_peer_name(device_id: str, name: str) -> bool:
+    """Обновить имя пира — он назвался по-другому (например, по модели телефона).
+
+    Имя не входит в cert и ни на что, кроме отображения, не влияет: доверие держится на
+    device_id и cert. False — если менять нечего (пира нет, имя пустое или то же самое).
+    """
+    name = (name or "").strip()
+    if not name:
+        return False
+    peers = list_peers()
+    for p in peers:
+        if p.device_id == device_id:
+            if p.name == name:
+                return False
+            p.name = name
+            _save_raw([x.as_dict() for x in peers])
+            return True
+    return False
+
+
 # --- адреса пиров (host:port для прямого подключения, в обход mDNS) ---
 #
 # Формат тот же, что у телефона (peer_addrs.json: device_id → {host, port}), и правило

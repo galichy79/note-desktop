@@ -63,6 +63,23 @@ def test_store(tmp_cfg):
     print("OK: хранилище адресов + очистка при remove_peer")
 
 
+def test_peer_name(tmp_cfg):
+    """Имя пира обновляется из hello: иначе два телефона так и останутся «Телефон»."""
+    from qtnotes.sync import peers
+    os.environ["XDG_CONFIG_HOME"] = tmp_cfg
+
+    assert peers.update_peer_name("nosuch", "X") is False, "несуществующего пира трогать нечем"
+    peers.add_peer("dev9", "Телефон", "PEM")
+    assert peers.update_peer_name("dev9", "Телефон SM-G970F") is True
+    assert peers.get_peer("dev9").name == "Телефон SM-G970F"
+    # то же имя и пустое имя — не пишем (файл не переписываем на каждом hello)
+    assert peers.update_peer_name("dev9", "Телефон SM-G970F") is False
+    assert peers.update_peer_name("dev9", "   ") is False
+    assert peers.get_peer("dev9").name == "Телефон SM-G970F"
+    peers.remove_peer("dev9")
+    print("OK: имя пира освежается из сессии, пустое/неизменившееся — нет")
+
+
 async def scenario(idA, idB, store, cfg):
     """Реальный TLS-loopback: телефон (A) дозвонился, десктоп (B) — нет."""
     from qtnotes.sync import engine as engine_mod
@@ -143,6 +160,7 @@ def main():
     try:
         test_merge_rules()
         test_store(cfg_b)
+        test_peer_name(cfg_b)
 
         os.environ["XDG_CONFIG_HOME"] = cfg_a
         id_a = identity.ensure_identity()

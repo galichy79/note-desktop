@@ -107,6 +107,9 @@ class Session:
             # дозвониться туда можно только по адресу (mDNS там не работает).
             self.engine._learn_peer_addr(self.peer_id, self._peer_host(),
                                         int(msg.get("port") or 0))
+            # Пир мог назваться по-другому (имя по модели телефона) — обновляем у себя,
+            # иначе в списке устройств два телефона так и останутся «Телефон».
+            self.engine._refresh_peer_name(self.peer_id, msg.get("name") or "")
             peer_proto = msg.get("proto")
             if peer_proto != PROTO_VERSION:
                 # A2: версии протокола различаются. НЕ закрываем — raise на неизвестный
@@ -214,6 +217,15 @@ class SyncEngine:
             peers_mod.save_peer_addr(peer_id, host, port)
         except OSError as e:
             _warn(f"не сохранил адрес пира {peer_id}: {e}")
+
+    def _refresh_peer_name(self, peer_id: str, name: str) -> None:
+        """Пир назвался иначе — обновить имя в trust-store (только для отображения)."""
+        try:
+            if peers_mod.update_peer_name(peer_id, name):
+                _warn(f"пир {peer_id} назвался: {name}")
+                self._changed()   # перерисовать список устройств в UI
+        except OSError as e:
+            _warn(f"не обновил имя пира {peer_id}: {e}")
 
     # --- доверие ---
 
