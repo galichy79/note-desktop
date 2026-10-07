@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+import time
 
 from . import discovery as discovery_mod
 from . import peers as peers_mod
@@ -26,6 +27,12 @@ def _warn(msg: str) -> None:
 
 _MAX_WANT_BLOBS = 4096   # H6: потолок числа блобов на один запрос want_blobs
 PROTO_VERSION = 1        # версия протокола синка (hello.proto)
+
+# Как часто обходить сохранённые адреса пиров и дозваниваться (сек). Нужно там, где
+# mDNS не работает — например, телефон раздаёт интернет: у интерфейса точки доступа
+# нет сети в ConnectivityManager, и NsdManager остаётся на мобильной сети без
+# мультикаста. Тогда единственный путь к паре — адрес, выученный из прошлой сессии.
+RECONNECT_INTERVAL = 20.0
 
 
 class Session:
@@ -47,9 +54,24 @@ class Session:
         async with self._write_lock:
             await wire.write_message(self.writer, obj)
 
+    def _peer_host(self) -> str:
+        """IP пира, каким он виден с нашей стороны ('' — если сокет уже закрылся).
+
+        Для входящего соединения это адрес, по которому пир к нам пришёл, — даже
+        если мы сами его не находили и в сохранённом адресе он устарел."""
+        try:
+            peername = self.writer.get_extra_info("peername")
+            return peername[0] if peername else ""
+        except (OSError, TypeError, IndexError):
+            return ""
+
     async def start(self) -> None:
         await self._send({"type": "hello", "device_id": self.engine.identity.device_id,
-                          "name": self.engine.identity.name, "proto": 1})
+                          "name": self.engine.identity.name, "proto": 1,
+                          # Свой порт прослушивания: пир запомнит его как адрес для
+                          # повторного подключения — в том числе когда соединение
+                          # инициировал он сам (у входящего порт источника эфемерный).
+                          "port": self.engine._port or 0})
         await self._send({"type": "have", "vv": self.store.version_vector()})
         try:
             while not self._closed:
@@ -71,6 +93,11 @@ class Session:
             if msg.get("device_id") and msg["device_id"] != self.peer_id:
                 self.close()   # заявленный id не совпал с TLS-сертификатом
                 return
+            # Адрес пира, каким он виден нам: IP из сокета + порт прослушивания из
+            # hello. Освежаем сохранённый — телефон мог переехать в другую сеть, а
+            # дозвониться туда можно только по адресу (mDNS там не работает).
+            self.engine._learn_peer_addr(self.peer_id, self._peer_host(),
+                                        int(msg.get("port") or 0))
             peer_proto = msg.get("proto")
             if peer_proto != PROTO_VERSION:
                 # A2: версии протокола различаются. НЕ закрываем — raise на неизвестный
@@ -167,6 +194,16 @@ class SyncEngine:
         self._connecting: set[str] = set()
         self._last_attempt: dict[str, float] = {}
         self._reconnect_cooldown = 3.0  # сек между попытками к одному пиру
+        # фоновая задача обхода сохранённых адресов (см. _dial_known_peers)
+        self._reconnect_task: asyncio.Task | None = None
+        self._dial_tasks: set[asyncio.Task] = set()
+
+    def _learn_peer_addr(self, peer_id: str, host: str, port: int) -> None:
+        """Запомнить адрес пира из живой сессии — чтобы дозвониться позже без mDNS."""
+        try:
+            peers_mod.save_peer_addr(peer_id, host, port)
+        except OSError as e:
+            _warn(f"не сохранил адрес пира {peer_id}: {e}")
 
     # --- доверие ---
 
@@ -238,9 +275,14 @@ class SyncEngine:
     # --- интеграция обнаружения (для прода) ---
 
     def _on_peer_found(self, found: "discovery_mod.FoundPeer") -> None:
-        import time
         if self._peer_cert(found.device_id) is None:
             return  # не доверенный — игнор
+        # mDNS отдаёт живой адрес — запоминаем и его: пригодится, когда mDNS
+        # окажется недоступен (телефон ушёл в режим точки доступа)
+        try:
+            peers_mod.save_peer_addr(found.device_id, found.host, found.port)
+        except OSError as e:
+            _warn(f"не сохранил адрес пира {found.device_id}: {e}")
         if found.device_id in self.sessions or found.device_id in self._connecting:
             return  # уже на связи или дозваниваемся — не плодим параллельные connect
         # одно соединение на пару: инициирует устройство с меньшим device_id
@@ -265,6 +307,50 @@ class SyncEngine:
             pass
         finally:
             self._connecting.discard(peer_id)  # слот свободен (сессия завершилась/не открылась)
+
+    # --- дозвон по сохранённым адресам ---
+
+    async def _reconnect_loop(self) -> None:
+        """Периодически дозваниваться до пиров по сохранённым адресам.
+
+        Страховка на случай, когда mDNS недоступен: пара держится только на адресе из
+        прошлой сессии, и освежить его можно, лишь установив соединение.
+        """
+        while True:
+            await asyncio.sleep(RECONNECT_INTERVAL)
+            try:
+                await self._dial_known_peers()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — цикл не должен умирать
+                _warn(f"обход сохранённых адресов: {e}")
+
+    async def _dial_known_peers(self) -> None:
+        """Дозвониться до доверенных пиров по сохранённым адресам.
+
+        Правило «инициирует устройство с меньшим device_id» здесь намеренно НЕ
+        применяется (в отличие от ветки mDNS): если телефон дозвониться не может —
+        его сохранённый адрес устарел, — звонить обязан десктоп, иначе пара встанет
+        до нового сопряжения по QR.
+        """
+        for peer_id, addr in peers_mod.load_peer_addrs().items():
+            if peer_id in self.sessions or peer_id in self._connecting:
+                continue  # уже на связи или дозваниваемся
+            if self._peer_cert(peer_id) is None:
+                continue  # не доверенный — игнор
+            host = str(addr.get("host") or "")
+            port = int(addr.get("port") or 0)
+            if not host or port <= 0:
+                continue
+            now = time.monotonic()
+            if now - self._last_attempt.get(peer_id, 0.0) < self._reconnect_cooldown:
+                continue  # недавно уже пытались — кулдаун против флаппинга
+            self._last_attempt[peer_id] = now
+            self._connecting.add(peer_id)  # резерв слота СИНХРОННо (как в mDNS-ветке)
+            task = asyncio.ensure_future(self._safe_connect(host, port, peer_id))
+            # ссылку держим: брошенную задачу сборщик мусора может снять на середине
+            self._dial_tasks.add(task)
+            task.add_done_callback(self._dial_tasks.discard)
 
     # --- фоновый поток (прод) ---
 
@@ -298,6 +384,8 @@ class SyncEngine:
             self._discovery.start()
         except Exception:  # noqa: BLE001 — без mDNS синк всё равно по прямому адресу
             self._discovery = None
+        # обход сохранённых адресов: страховка на случай недоступного mDNS
+        self._reconnect_task = self._loop.create_task(self._reconnect_loop())
         self._loop.run_forever()
 
     def notify_change(self) -> None:
@@ -312,6 +400,9 @@ class SyncEngine:
             return
 
         async def shutdown():
+            if self._reconnect_task is not None:
+                self._reconnect_task.cancel()
+                self._reconnect_task = None
             for sess in list(self.sessions.values()):
                 sess.close()
             if self._discovery is not None:

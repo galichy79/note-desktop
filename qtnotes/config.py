@@ -165,6 +165,15 @@ def peers_path() -> Path:
     return _xdg_config_home() / APP_DIR_NAME / "peers.json"
 
 
+def peer_addrs_path() -> Path:
+    """Последние известные адреса пиров (host:port) для прямого подключения.
+
+    Отдельно от peers.json: доверие (cert) и адрес — разные вещи, адрес устаревает
+    и обновляется сам. Нужен там, где mDNS не работает (например, телефон раздаёт
+    интернет) — тогда дозвониться можно только по сохранённому адресу."""
+    return _xdg_config_home() / APP_DIR_NAME / "peer_addrs.json"
+
+
 def sync_enabled() -> bool:
     return bool(get_setting("sync_enabled", False))
 
