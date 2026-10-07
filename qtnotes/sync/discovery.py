@@ -10,7 +10,10 @@
 
 from __future__ import annotations
 
+import fcntl
+import ipaddress
 import socket
+import struct
 from dataclasses import dataclass
 
 from zeroconf import ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
@@ -54,6 +57,80 @@ def _all_ips() -> list[str]:
     except OSError:
         pass
     return ips or ["127.0.0.1"]
+
+
+_SIOCGIFADDR = 0x8915       # ioctl: IPv4-адрес интерфейса
+_SIOCGIFNETMASK = 0x891b    # ioctl: маска подсети интерфейса
+
+
+def _iface_ipv4(ifname: str, request: int) -> str | None:
+    """IPv4-адрес или маска интерфейса через ioctl (Linux). None — если не вышло."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return None
+    try:
+        packed = struct.pack("256s", ifname.encode("utf-8")[:15])
+        res = fcntl.ioctl(s.fileno(), request, packed)
+        return socket.inet_ntoa(res[20:24])
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def local_ipv4() -> list[tuple[str, str]]:
+    """(адрес, маска) каждого IPv4-интерфейса, кроме loopback и link-local.
+
+    Нужно для перебора своей подсети: спросить у ядра, а не угадывать по имени хоста
+    (`_all_ips` отдаёт не все интерфейсы — VPN, мосты Docker и клиент точки доступа
+    туда попадают не всегда).
+    """
+    out: list[tuple[str, str]] = []
+    try:
+        names = [name for _, name in socket.if_nameindex()]
+    except OSError:
+        names = []
+    for name in names:
+        if name == "lo":
+            continue
+        ip = _iface_ipv4(name, _SIOCGIFADDR)
+        if not ip or ip.startswith("127.") or ip.startswith("169.254."):
+            continue
+        mask = _iface_ipv4(name, _SIOCGIFNETMASK) or "255.255.255.0"
+        out.append((ip, mask))
+    return out
+
+
+def scan_candidates(limit: int = 1024) -> list[str]:
+    """Адреса-кандидаты для перебора: хосты своих подсетей, кроме своих адресов.
+
+    Правила:
+      * маска берётся у интерфейса, а если её не отдать — считаем /24 (так устроены и
+        точка доступа Android, и почти все домашние сети);
+      * сеть шире `limit` адресов целиком не перебираем (у мостов Docker/libvirt маска
+        /16 — это 65 тысяч попыток впустую), но свою /24 внутри неё берём: пир, скорее
+        всего, сосед по подсети;
+      * подсеть основного интерфейса идёт первой — там пир вероятнее всего, и перебор
+        остановится, как только он найдётся.
+    """
+    pairs = local_ipv4()
+    if not pairs:
+        # интерфейсы спросить не удалось — обходим хотя бы основную подсеть по /24
+        pairs = [(ip, "255.255.255.0") for ip in _all_ips()]
+    primary = _primary_ip()
+    pairs.sort(key=lambda p: 0 if p[0] == primary else 1)
+    mine = {ip for ip, _ in pairs}
+    hosts: list[str] = []
+    for ip, mask in pairs:
+        try:
+            net = ipaddress.ip_network(f"{ip}/{mask}", strict=False)
+        except ValueError:
+            continue
+        if net.num_addresses > limit:
+            net = ipaddress.ip_network(f"{ip}/24", strict=False)
+        hosts += [str(h) for h in net.hosts() if str(h) not in mine]
+    return list(dict.fromkeys(hosts))   # интерфейсы могут делить одну подсеть
 
 
 def _prop(props: dict, key: bytes) -> str:

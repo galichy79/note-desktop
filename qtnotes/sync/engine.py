@@ -34,6 +34,15 @@ PROTO_VERSION = 1        # версия протокола синка (hello.pro
 # мультикаста. Тогда единственный путь к паре — адрес, выученный из прошлой сессии.
 RECONNECT_INTERVAL = 20.0
 
+# Перебор своей подсети в поиске пира. Страховка от смены подсети (Android умеет
+# рандомизировать подсеть точки доступа): сохранённые адреса обеих сторон устаревают
+# разом, и дозвониться первым может только тот, кто найдёт пира перебором. Операция
+# тяжёлая (сотни TLS-попыток), поэтому не чаще SCAN_INTERVAL и только когда пир,
+# с которым есть доверие, сейчас не на связи.
+SCAN_TIMEOUT = 0.35      # сек на одну попытку (TCP + TLS до чужого хоста)
+SCAN_CONCURRENCY = 64    # сколько адресов пробуем одновременно
+SCAN_INTERVAL = 300.0    # сек между обходами подсети
+
 
 class Session:
     """Одно TLS-соединение с пиром. Гоняет протокол до закрытия."""
@@ -197,6 +206,7 @@ class SyncEngine:
         # фоновая задача обхода сохранённых адресов (см. _dial_known_peers)
         self._reconnect_task: asyncio.Task | None = None
         self._dial_tasks: set[asyncio.Task] = set()
+        self._last_scan = 0.0   # время последнего перебора подсети
 
     def _learn_peer_addr(self, peer_id: str, host: str, port: int) -> None:
         """Запомнить адрес пира из живой сессии — чтобы дозвониться позже без mDNS."""
@@ -351,6 +361,80 @@ class SyncEngine:
             # ссылку держим: брошенную задачу сборщик мусора может снять на середине
             self._dial_tasks.add(task)
             task.add_done_callback(self._dial_tasks.discard)
+        # сохранённые адреса не помогли — пробуем найти пира перебором подсети
+        now = time.monotonic()
+        if now - self._last_scan >= SCAN_INTERVAL:
+            self._last_scan = now
+            await self._scan_subnets()
+
+    # --- перебор подсети ---
+
+    async def _probe_peer(self, host: str, port: int, peer_id: str, cert_pem: str):
+        """Попытка TLS-соединения с конкретным пиром (пин по его cert).
+
+        Успешное рукопожатие само доказывает, что на том конце именно он: cert у нас
+        самоподписанный, и проверяем мы ровно его. Возвращает (reader, writer) или None.
+        """
+        try:
+            reader, writer = await asyncio.wait_for(
+                transport.open_connection(host, port, self.identity, cert_pem),
+                timeout=SCAN_TIMEOUT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — закрытый порт, чужой хост, таймаут: не наш пир
+            return None
+        if transport.peer_device_id(writer.get_extra_info("ssl_object")) != peer_id:
+            writer.close()      # сертификат не того устройства — мимо
+            return None
+        return reader, writer
+
+    async def _scan_for_peer(self, peer_id: str, port: int, cert_pem: str,
+                             hosts: list[str] | None = None):
+        """Найти пира перебором адресов. Порт известен из прошлой сессии.
+
+        `hosts` подменяется в тестах; в бою берётся перебор своей подсети.
+        """
+        candidates = hosts if hosts is not None else discovery_mod.scan_candidates()
+        found: tuple | None = None
+        sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+        async def probe(host: str) -> None:
+            nonlocal found
+            if found is not None:
+                return                      # уже нашли — остальное неважно
+            async with sem:
+                if found is not None:
+                    return
+                conn = await self._probe_peer(host, port, peer_id, cert_pem)
+                if conn is not None:
+                    found = (host, conn)
+
+        await asyncio.gather(*(probe(h) for h in candidates), return_exceptions=True)
+        return found
+
+    async def _scan_subnets(self) -> None:
+        """Обойти свою подсеть в поиске пиров, с которыми нет связи.
+
+        Порт пира берём из сохранённого адреса: без порта перебирать нечего, а он,
+        в отличие от IP, у пира стабильный.
+        """
+        addrs = peers_mod.load_peer_addrs()
+        for p in self.get_peers():
+            if p.device_id in self.sessions or p.device_id in self._connecting:
+                continue                    # уже на связи или дозваниваемся
+            port = int((addrs.get(p.device_id) or {}).get("port") or 0)
+            if not p.cert_pem or port <= 0:
+                continue                    # порт неизвестен — перебор невозможен
+            found = await self._scan_for_peer(p.device_id, port, p.cert_pem)
+            if found is None:
+                continue
+            host, (reader, writer) = found
+            _warn(f"пир {p.device_id} найден перебором подсети: {host}:{port}")
+            self._connecting.add(p.device_id)
+            task = asyncio.ensure_future(self._run_session(reader, writer, p.device_id))
+            self._dial_tasks.add(task)
+            task.add_done_callback(self._dial_tasks.discard)
+            task.add_done_callback(lambda _t, pid=p.device_id: self._connecting.discard(pid))
 
     # --- фоновый поток (прод) ---
 
