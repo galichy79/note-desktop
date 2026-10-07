@@ -34,7 +34,12 @@ def main():
     relpath = "folders/f1/notes/n1.json"
     plaintext = "Привет 🎉".encode("utf-8")
     subkey = cfs._subkey(mk, relpath.encode("utf-8"))          # HKDF(mk,"file/"+relpath)
-    py_sealed = cfs.MAGIC + P.seal(subkey, plaintext, aad=relpath.encode("utf-8"))
+    # nonce фиксирован: golden-вектор обязан быть воспроизводимым. Со случайным nonce
+    # каждый прогон переписывал vectors.json (менялся только py_sealed_b64) и пачкал
+    # рабочее дерево — настоящие изменения векторов тонули бы в этом шуме.
+    TEST_NONCE = bytes(range(12))
+    py_sealed = cfs.MAGIC + P.seal(subkey, plaintext, aad=relpath.encode("utf-8"),
+                                   nonce=TEST_NONCE)
 
     note = Note(id="n1", folder_id="f1", kind="text", html="<p>Привет 🎉</p>",
                 plaintext="Привет 🎉", caption_html="", attachments=[], date_tag=None,
@@ -69,14 +74,16 @@ def main():
         os.remove(out_path)
 
     # найти мобильный проект: либо подкаталог mobile/ (моно-лейаут), либо соседний
-    # репозиторий ../qtnotes-mobile. Если нет dart или проекта — пропускаем Dart-сторону.
+    # каталог с любым из имён проекта (note-mobile — как называется чекаут у
+    # разработчика). Если нет dart или проекта — пропускаем Dart-сторону.
     mobile_dir = next(
         (d for d in (os.path.join(repo, "mobile"),
-                     os.path.join(os.path.dirname(repo), "qtnotes-mobile"))
+                     os.path.join(os.path.dirname(repo), "qtnotes-mobile"),
+                     os.path.join(os.path.dirname(repo), "note-mobile"))
          if os.path.exists(os.path.join(d, "test", "golden_conformance_test.dart"))),
         None)
     if _DART is None or mobile_dir is None:
-        print("⚠ dart или проект qtnotes-mobile не найдены — пропускаю Dart-сторону "
+        print("⚠ dart или проект мобильного приложения не найден — пропускаю Dart-сторону "
               "(Python-сторона проверена)")
         return
     env = dict(os.environ, GOLDEN_DIR=gdir)

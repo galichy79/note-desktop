@@ -171,14 +171,16 @@ def run_dart(repo, gdir, py_results):
     out_path = os.path.join(gdir, "conv_out.json")
     if os.path.exists(out_path):
         os.remove(out_path)
-    # мобильный проект: подкаталог mobile/ (моно-лейаут) или соседний ../qtnotes-mobile
+    # мобильный проект: подкаталог mobile/ (моно-лейаут) или соседний каталог с любым
+    # из имён проекта (note-mobile — как называется чекаут у разработчика)
     mobile_dir = next(
         (d for d in (os.path.join(repo, "mobile"),
-                     os.path.join(os.path.dirname(repo), "qtnotes-mobile"))
+                     os.path.join(os.path.dirname(repo), "qtnotes-mobile"),
+                     os.path.join(os.path.dirname(repo), "note-mobile"))
          if os.path.exists(os.path.join(d, "test", "convergence_conformance_test.dart"))),
         None)
     if _DART is None or mobile_dir is None:
-        print("⚠ dart или проект qtnotes-mobile не найдены — пропускаю Dart-сторону "
+        print("⚠ dart или проект мобильного приложения не найден — пропускаю Dart-сторону "
               "(Python-сторона сходимости проверена)")
         return []
     env = dict(os.environ, CONV_DIR=gdir)

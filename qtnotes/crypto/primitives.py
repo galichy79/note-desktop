@@ -36,16 +36,24 @@ def hmac_sha256(key: bytes, message: bytes) -> bytes:
     return _hmac.new(key, message, "sha256").digest()
 
 
-def seal(key: bytes, plaintext: bytes, aad: bytes = b"") -> bytes:
+def seal(key: bytes, plaintext: bytes, aad: bytes = b"",
+         nonce: bytes | None = None) -> bytes:
     """Зашифровать AES-256-GCM. Результат: nonce(12) || ciphertext+tag.
 
     Случайный nonce на каждый вызов; для нашего объёма данных вероятность
     коллизии пренебрежимо мала. aad (associated data) аутентифицируется, но не
     шифруется — сюда кладём контекст (например, путь файла) для защиты от подмены.
+
+    nonce можно задать явно ТОЛЬКО ради воспроизводимых тест-векторов (golden-vector
+    конформанс): повторный nonce с тем же ключом ломает GCM начисто, поэтому в рабочем
+    коде этот параметр не передаётся никогда.
     """
     if len(key) != KEY_LEN:
         raise ValueError("ключ должен быть 32 байта")
-    nonce = random_bytes(NONCE_LEN)
+    if nonce is None:
+        nonce = random_bytes(NONCE_LEN)
+    elif len(nonce) != NONCE_LEN:
+        raise ValueError(f"nonce должен быть {NONCE_LEN} байт")
     ct = AESGCM(key).encrypt(nonce, plaintext, aad)
     return nonce + ct
 
