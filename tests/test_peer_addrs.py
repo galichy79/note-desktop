@@ -57,7 +57,7 @@ def test_store(tmp_cfg):
     assert config.peer_addrs_path().exists()
 
     # remove_peer чистит и адрес
-    peers.add_peer("dev1", "Телефон", "PEM", )
+    peers.add_peer("dev1", "Телефон", "PEM")
     peers.remove_peer("dev1")
     assert "dev1" not in peers.load_peer_addrs(), "адрес удалённого пира остался"
     print("OK: хранилище адресов + очистка при remove_peer")
