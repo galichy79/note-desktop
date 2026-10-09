@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import dbg
 from ..storage import vault
 from .mediamenu import show_media_menu
 from .textutils import colorize_links, linkify_references, strip_theme_overrides
@@ -88,7 +90,9 @@ class _FileChip(QFrame):
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event):  # noqa: N802
-        show_media_menu(self, event.globalPos(), self._path)
+        dbg.log("ctx", where="file", path=Path(self._path).name,
+                wait_ms=dbg.fmt_ms(dbg.press_wait()))
+        show_media_menu(self, event.globalPos(), self._path, where="file")
 
 
 class _MediaLabel(QLabel):
@@ -105,6 +109,10 @@ class _MediaLabel(QLabel):
         self._movie = None         # для GIF (берём текущий кадр)
 
     def contextMenuEvent(self, event):  # noqa: N802
+        # Диагностика: путь с ленивым декодом картинки — единственное место, где
+        # заметна слабая машина (декод крупного фото идёт до показа меню).
+        cached = self._movie is not None or self._copy_pixmap is not None
+        t0 = time.perf_counter()
         if self._movie is not None:
             pm = self._movie.currentPixmap()
         elif self._copy_pixmap is not None:
@@ -113,7 +121,10 @@ class _MediaLabel(QLabel):
             pm = QPixmap(self._path)   # ленивая загрузка для копирования
             if pm.isNull():
                 pm = None
-        show_media_menu(self, event.globalPos(), self._path, pm)
+        dbg.log("ctx", where="media_img", cached=cached,
+                decode_ms=f"{(time.perf_counter() - t0) * 1000:.1f}",
+                wait_ms=dbg.fmt_ms(dbg.press_wait()))
+        show_media_menu(self, event.globalPos(), self._path, pm, where="media_img")
 
 
 class _NoteText(QLabel):
@@ -420,13 +431,17 @@ class MessageBubble(QWidget):
             QDesktopServices.openUrl(QUrl(href))
 
     def contextMenuEvent(self, event):  # noqa: N802
+        dbg.log("ctx", where="bubble", note=self.note.id[:8], kind=self.note.kind,
+                wait_ms=dbg.fmt_ms(dbg.press_wait()))
         menu = QMenu(self)
         act_edit = menu.addAction("Изменить")
         act_copy = menu.addAction("Копировать текст")
         act_id = menu.addAction("Копировать ID-ссылку")
         menu.addSeparator()
         act_del = menu.addAction("Удалить заметку")
+        dbg.trace_menu(menu, "bubble")
         chosen = menu.exec(event.globalPos())
+        dbg.log("ctx_done", where="bubble", chosen=dbg.chosen_label(chosen))
         if chosen == act_edit:
             self.editRequested.emit(self.note.id)
         elif chosen == act_copy:

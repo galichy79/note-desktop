@@ -31,6 +31,14 @@ def run() -> int:
     app.setStyleSheet(build_qss())
     apply_font(app)
 
+    # Диагностика «ПКМ открывается медленно / не открывается»: включается только
+    # переменной QTNOTES_DEBUG_CTX=1, без неё — no-op (см. qtnotes/dbg.py).
+    from . import dbg
+    if dbg.install(app):
+        from . import config
+        dbg.log("start", sync_enabled=config.get_setting("sync_enabled", False),
+                font=config.font_family() or "system")
+
     # гейт разблокировки: если настроено локальное шифрование — спросить ПИН ДО
     # доступа к данным (индекс перестраивается из РАСШИФРОВАННЫХ заметок, нужен MK).
     if not _unlock_gate():

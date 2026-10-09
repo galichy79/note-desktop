@@ -6,8 +6,10 @@ from PySide6.QtCore import QMimeData, QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMenu
 
+from .. import dbg
 
-def show_media_menu(widget, global_pos, path, pixmap=None) -> bool:
+
+def show_media_menu(widget, global_pos, path, pixmap=None, where: str = "media") -> bool:
     """Показать меню для медиа. pixmap задаётся для изображений (копировать как картинку).
 
     Возвращает True, если меню показано/обработано.
@@ -18,7 +20,9 @@ def show_media_menu(widget, global_pos, path, pixmap=None) -> bool:
         act_img = menu.addAction("Копировать изображение")
     act_file = menu.addAction("Копировать файл")
     act_path = menu.addAction("Копировать путь к файлу")
+    dbg.trace_menu(menu, where)
     chosen = menu.exec(global_pos)
+    dbg.log("ctx_done", where=where, chosen=dbg.chosen_label(chosen))
     if chosen is None:
         return True
 

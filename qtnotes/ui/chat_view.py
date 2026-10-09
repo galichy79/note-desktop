@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import dbg
 from ..storage import index
 from ..storage import search as search_mod
 from ..storage import vault
@@ -525,9 +526,14 @@ class ChatView(QWidget):
 
     def _confirm_discard(self) -> bool:
         from PySide6.QtWidgets import QMessageBox
+        # Пока эта модалка открыта, клики по ленте не доходят вообще — поэтому её
+        # открытие и закрытие пишем в лог (диагностика «ПКМ не открывается»).
+        dbg.log("modal", what="confirm_discard", phase="open")
         r = QMessageBox.question(
             self, "Несохранённый ввод", "Сбросить набранный текст и вложения?",
             QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel)
+        dbg.log("modal", what="confirm_discard", phase="closed",
+                answer="discard" if r == QMessageBox.StandardButton.Discard else "cancel")
         return r == QMessageBox.StandardButton.Discard
 
     def _error(self, title: str, e: Exception) -> None:
@@ -546,6 +552,7 @@ class ChatView(QWidget):
             return
         self._current_folder = folder  # поля папки могли измениться (имя/цвет)
         self._title.setText(folder.name)
+        dbg.log("rebuild", src="sync", folder=folder.name)
         keep_sel = set(self._selected)   # снимок выделения — _clear_bubbles его очистит
         self._clear_bubbles()
         self._load_gen += 1  # H7: пометить новую загрузку (старый результат отбросить)
@@ -559,6 +566,8 @@ class ChatView(QWidget):
 
     def show_folder(self, folder) -> None:
         # M2: не терять несохранённый ввод при переключении папки (молча очищалось)
+        dbg.log("show_folder", folder=getattr(folder, "name", None),
+                unsaved=self._has_unsaved(), same=folder is self._current_folder)
         if (folder is not self._current_folder and self._has_unsaved()
                 and not self._confirm_discard()):
             return
@@ -595,8 +604,9 @@ class ChatView(QWidget):
             return  # папку переключили — прекращаем рендер устаревшего списка
         chunk = 40
         end = min(start + chunk, len(notes))
-        for i in range(start, end):
-            self._add_bubble(notes[i], scroll=False)
+        with dbg.span("render_chunk", a=start, b=end, total=len(notes)):
+            for i in range(start, end):
+                self._add_bubble(notes[i], scroll=False)
         if end < len(notes):
             from PySide6.QtCore import QTimer
             QTimer.singleShot(0, lambda: self._render_chunk(notes, end, gen))
@@ -627,10 +637,11 @@ class ChatView(QWidget):
         self._update_selbar()
 
     def _clear_bubbles(self) -> None:
-        for b in self._bubbles:
-            b.set_active(False)   # остановить видео/гиф до удаления
-            b.setParent(None)
-            b.deleteLater()
+        with dbg.span("clear_bubbles", n=len(self._bubbles)):
+            for b in self._bubbles:
+                b.set_active(False)   # остановить видео/гиф до удаления
+                b.setParent(None)
+                b.deleteLater()
         self._bubbles.clear()
         self._selected.clear()
         self._update_selbar()
@@ -1018,22 +1029,29 @@ class ChatView(QWidget):
         self._reset_input()
 
     def _on_edit_note(self, note_id: str) -> None:
-        for b in self._bubbles:
-            if b.note.id == note_id:
-                note = b.note
-                content = note.html if note.kind == "text" else note.caption_html
-                self._editing_note = note
-                self._field.setHtml(content or "")
-                self._edit_label.setText(
-                    "Изменение заметки" if note.kind == "text" else "Изменение подписи"
-                )
-                self._edit_banner.show()
-                self._send.setText("Сохранить")
-                self._field.setFocus()
-                cur = self._field.textCursor()
-                cur.movePosition(cur.MoveOperation.End)
-                self._field.setTextCursor(cur)
-                break
+        with dbg.span("edit_note", note=note_id[:8]):
+            found = False
+            for b in self._bubbles:
+                if b.note.id == note_id:
+                    found = True
+                    note = b.note
+                    content = note.html if note.kind == "text" else note.caption_html
+                    self._editing_note = note
+                    self._field.setHtml(content or "")
+                    self._edit_label.setText(
+                        "Изменение заметки" if note.kind == "text" else "Изменение подписи"
+                    )
+                    self._edit_banner.show()
+                    self._send.setText("Сохранить")
+                    self._field.setFocus()
+                    cur = self._field.textCursor()
+                    cur.movePosition(cur.MoveOperation.End)
+                    self._field.setTextCursor(cur)
+                    break
+            if not found:
+                # Правка молча не включается — надо видеть, что запрос пришёл не к тому пузырю
+                dbg.log("edit_note", phase="miss", note=note_id[:8],
+                        bubbles=len(self._bubbles))
 
     def _on_delete_note(self, note_id: str) -> None:
         refs = [r for r in index.referrers(note_id) if r != note_id]
