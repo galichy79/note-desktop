@@ -7,6 +7,7 @@
 import os
 import sys
 import tempfile
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # ВАЖНО: изолированные временные vault и config — тест НЕ должен трогать реальные
@@ -22,8 +23,70 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from qtnotes.ui.main_window import MainWindow  # noqa: E402
 from qtnotes.ui.theme import build_qss  # noqa: E402
 
+app: QApplication = None  # создаётся в main(); нужен помощнику wait_feed
+
+
+def _busy(worker) -> bool:
+    try:
+        return worker is not None and worker.isRunning()
+    except RuntimeError:
+        return False   # объект уже удалён Qt (deleteLater) — считаем, что не занят
+
+
+def _worker_busy(win) -> bool:
+    return _busy(getattr(win.chat, "_load_worker", None))
+
+
+def wait_ingest(win, expect: int, timeout: float = 5.0) -> None:
+    """Дождаться, пока приём вложений создаст заметку (пузырей станет `expect`).
+
+    `_IngestWorker` копирует и шифрует blob'ы в отдельном потоке, а заметку добавляет
+    обработчик сигнала `done` (см. `chat_view._send_pending`). Проверять только
+    `isRunning()` нельзя: поток на мелких файлах завершается раньше, чем сигнал
+    попадёт в очередь UI, и ожидание закончилось бы ни с чем. Поэтому ждём результат.
+    """
+    if app is None:
+        raise RuntimeError("wait_ingest вызван до создания QApplication")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if (len(win.chat._bubbles) >= expect
+                and not _busy(getattr(win.chat, "_ingest_worker", None))):
+            return
+        time.sleep(0.005)
+    raise AssertionError(f"заметка с вложениями не появилась за {timeout} с "
+                         f"(пузырей {len(win.chat._bubbles)}, ждали {expect})")
+
+def wait_feed(win, expect=None, timeout: float = 5.0) -> None:
+    """Дождаться загрузки ленты.
+
+    Лента грузится НЕ синхронно: `_FolderLoadWorker` читает заметки в отдельном потоке,
+    а пузыри строятся чанками по 40 с уступкой event-loop (см. `chat_view._render_chunk`).
+    Поэтому сразу после `show_folder` проверять `_bubbles` нельзя — надо покрутить
+    очередь событий. `expect` — ожидаемое число пузырей (None — просто дождаться конца).
+    """
+    if app is None:
+        raise RuntimeError("wait_feed вызван до создания QApplication")
+    deadline = time.monotonic() + timeout
+    stable, prev = 0, -1
+    while time.monotonic() < deadline:
+        app.processEvents()
+        n = len(win.chat._bubbles)
+        if n == prev and not _worker_busy(win) and (expect is None or n == expect):
+            stable += 1
+            if stable >= 2:   # два прохода подряд без изменений — рендер закончен
+                return
+        else:
+            stable = 0
+        prev = n
+        time.sleep(0.005)
+    raise AssertionError(
+        f"лента не догрузилась за {timeout} с: пузырей {len(win.chat._bubbles)}"
+        + (f", ждали {expect}" if expect is not None else ""))
+
 
 def main() -> int:
+    global app
     app = QApplication(sys.argv)
     app.setStyleSheet(build_qss())
     win = MainWindow()
@@ -49,6 +112,7 @@ def main() -> int:
 
     # перезагрузка папки — заметка сохраняется
     win.chat.show_folder(folder)
+    wait_feed(win, expect=1)
     assert len(win.chat._bubbles) == 1, "заметка не восстановилась после перезагрузки"
     assert "вторая строка" in win.chat._bubbles[0].note.plaintext
 
@@ -77,10 +141,13 @@ def main() -> int:
     win.chat._attach_paths([txt, png])
     assert len(win.chat._pending) == 2
     win.chat._field.setPlainText("подпись")
+    before = len(win.chat._bubbles)
     win.chat._submit()
+    wait_ingest(win, expect=before + 1)
     note = win.chat._bubbles[-1].note
     assert note.kind == "album" and len(note.attachments) == 2, note.kind
     win.chat.show_folder(folder)
+    wait_feed(win)
     assert any(b.note.attachments for b in win.chat._bubbles), "вложения не загрузились"
 
     # иконки папок: создать папку с иконкой и проверить сохранение
@@ -89,6 +156,7 @@ def main() -> int:
 
     # мультивыбор: выделить две заметки → панель действий видна
     win.chat.show_folder(folder)
+    wait_feed(win)
     ids = [b.note.id for b in win.chat._bubbles[:2]]
     for nid in ids:
         win.chat._toggle_selection(nid)
@@ -138,6 +206,7 @@ def main() -> int:
     before = len(win.chat._bubbles)
     win.chat._field.setPlainText("подпись к медиа")
     win.chat._submit()
+    wait_ingest(win, expect=before + 1)
     assert len(win.chat._bubbles) == before + 1, "медиа-заметка не создалась"
     note = win.chat._bubbles[-1].note
     assert note.kind == "album" and len(note.attachments) == 2, note.kind
@@ -174,6 +243,7 @@ def main() -> int:
 
     # поиск: ввод запроса показывает страницу результатов
     win.chat.show_folder(folder)
+    wait_feed(win)
     win.chat._search.setText("изменённый")
     win.chat._run_search()  # без ожидания дебаунса
     assert win.chat._content_stack.currentIndex() == 1, "не показалась страница результатов"
