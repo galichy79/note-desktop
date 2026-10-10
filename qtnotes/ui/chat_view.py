@@ -320,7 +320,9 @@ class ChatView(QWidget):
         from .theme import wallpaper_path
         wp = wallpaper_path()
         self._wallpaper = QPixmap(wp) if wp else QPixmap()
-        self._wall_scaled = None
+        self._wall_blur = None       # мелкое размытие обоев: считается ОДИН раз
+        self._wall_blur_src = 0      # под какой размер оно посчитано
+        self._wall_scaled = None     # оно же, растянутое под текущий размер
         self._wall_for_size = None   # размер, под который посчитан _wall_scaled
         # прозрачность слоёв ленты задаётся в QSS по именам объектов
         # (#ChatContent/#ChatFeed/#ResultsHost), чтобы НЕ задеть пузыри.
@@ -328,22 +330,45 @@ class ChatView(QWidget):
             self._scroll.viewport().setAutoFillBackground(False)
             self._results_scroll.viewport().setAutoFillBackground(False)
 
+    # Шаг, через который пересчитывается фон. Перетаскивание края окна меняет
+    # размер каждый кадр, а полный пересчёт (cover + down + up Smooth) стоит
+    # ~9 мс на 1280x800 и до 18 мс крупнее — на каждом кадре это рывки. Ступенька
+    # в 64 px делает пересчёт редким и незаметным, а внутри ступеньки фон берётся
+    # из кэша (лишние 63 px размытой картинки не видно за тёмной заливкой).
+    _WALL_STEP = 64
+
     def _make_blurred(self, size):
-        """Заполнить размер обоями (cover) с лёгким размытием (down/up-scale)."""
-        from PySide6.QtCore import QSize
-        cover = self._wallpaper.scaled(size, Qt.KeepAspectRatioByExpanding,
-                                       Qt.SmoothTransformation)
-        small = QSize(max(1, cover.width() // 14), max(1, cover.height() // 14))
-        blurred = cover.scaled(small, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        return blurred.scaled(cover.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        """Размытый фон под размер окна (cover). Размытие считается один раз.
+
+        Раньше на каждый размер заново шли cover + down + up; теперь мелкая
+        размытая копия делается один раз — и только если окно выросло больше
+        того размера, под который она считалась (иначе размытие «замылилось» бы
+        при растягивании из слишком мелкой копии).
+        """
+        if self._wall_blur is None or max(size.width(), size.height()) > self._wall_blur_src:
+            cover = self._wallpaper.scaled(size, Qt.KeepAspectRatioByExpanding,
+                                           Qt.SmoothTransformation)
+            small = QSize(max(1, cover.width() // 14), max(1, cover.height() // 14))
+            self._wall_blur = cover.scaled(small, Qt.IgnoreAspectRatio,
+                                           Qt.SmoothTransformation)
+            self._wall_blur_src = max(size.width(), size.height())
+        return self._wall_blur.scaled(size, Qt.KeepAspectRatioByExpanding,
+                                      Qt.SmoothTransformation)
+
+    def _wall_size_for(self, size):
+        """Размер окна, округлённый вверх до ступени (кэш фона считается по нему)."""
+        st = self._WALL_STEP
+        return QSize(((size.width() + st - 1) // st) * st,
+                     ((size.height() + st - 1) // st) * st)
 
     def paintEvent(self, e):  # noqa: N802
         if not self._wallpaper.isNull():
             from PySide6.QtGui import QColor, QPainter
             p = QPainter(self)
-            if self._wall_scaled is None or self._wall_for_size != self.size():
-                self._wall_scaled = self._make_blurred(self.size())
-                self._wall_for_size = self.size()
+            bucket = self._wall_size_for(self.size())
+            if self._wall_scaled is None or self._wall_for_size != bucket:
+                self._wall_scaled = self._make_blurred(bucket)
+                self._wall_for_size = bucket
             x = (self.width() - self._wall_scaled.width()) // 2
             y = (self.height() - self._wall_scaled.height()) // 2
             # рисуем ТОЛЬКО грязный прямоугольник (дёшево при частичных обновлениях)
