@@ -18,15 +18,16 @@ from PySide6.QtWidgets import (
 
 from .. import config
 from ..storage import exporter, vault
-from .calendar_view import CalendarView
 from .chat_view import ChatView
 from .folder_dialog import FolderDialog
 from .settings_dialog import SettingsDialog
 from .sidebar import Sidebar
-from .sync_manager import SyncManager
 
 
 class MainWindow(QMainWindow):
+    # Сколько ждать первую отрисовку, прежде чем поднять синк в любом случае.
+    SYNC_START_FALLBACK_MS = 700
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("QtNotes")
@@ -44,9 +45,8 @@ class MainWindow(QMainWindow):
         # Основная область: лента заметок / календарь.
         self.stack = QStackedWidget()
         self.chat = ChatView()
-        self.calendar_page = CalendarView()
-        self.stack.addWidget(self.chat)            # index 0
-        self.stack.addWidget(self.calendar_page)   # index 1
+        self._calendar = None                       # строится при первом открытии
+        self.stack.addWidget(self.chat)             # index 0
         layout.addWidget(self.stack, 1)
 
         self.setCentralWidget(central)
@@ -71,12 +71,58 @@ class MainWindow(QMainWindow):
         self._reload_folders()
 
         # Синхронизация (опциональна, по умолчанию выключена).
-        self.sync = SyncManager(self)
-        self.sync.remoteChanged.connect(self._on_remote_changed, Qt.QueuedConnection)
+        # Менеджер создаётся при первом обращении, а движок поднимается ПОСЛЕ
+        # первого кадра окна (showEvent): импорт стека синка тянет asyncio и
+        # cryptography — 69 мс по замеру (tools/perf_bench.py), и окну незачем
+        # их ждать.
+        self._sync = None
+        self._sync_start_pending = True
         self._sync_refresh = QTimer(self)
         self._sync_refresh.setSingleShot(True)
         self._sync_refresh.setInterval(300)
         self._sync_refresh.timeout.connect(self._do_sync_refresh)
+
+    @property
+    def calendar_page(self):
+        """Страница календаря — строится при первом обращении.
+
+        Пока календарь не открывали, его импорт и постройка (~20 мс) не нужны;
+        на старте окна они были лишними.
+        """
+        if self._calendar is None:
+            from .calendar_view import CalendarView
+            self._calendar = CalendarView()
+            self.stack.addWidget(self._calendar)
+        return self._calendar
+
+    @property
+    def sync(self):
+        """Менеджер синхронизации — создаётся при первом обращении (см. __init__)."""
+        if self._sync is None:
+            from .sync_manager import SyncManager
+            self._sync = SyncManager(self)
+            self._sync.remoteChanged.connect(self._on_remote_changed, Qt.QueuedConnection)
+        return self._sync
+
+    def showEvent(self, e):  # noqa: N802
+        super().showEvent(e)
+        # Страховка: если отрисовки так и не будет (headless, тесты без показа),
+        # синк всё равно поднимется — молча оставить его незапущенным нельзя.
+        if self._sync_start_pending:
+            QTimer.singleShot(self.SYNC_START_FALLBACK_MS, self._start_sync)
+
+    def paintEvent(self, e):  # noqa: N802
+        super().paintEvent(e)
+        # Синк поднимаем после ПЕРВОЙ отрисовки окна. singleShot(0) из showEvent для
+        # этого не годится: таймер обгоняет событие отрисовки (замер: импорт стека
+        # синка — 100 мс, первая краска окна — 248 мс), и окно всё равно ждало бы.
+        if self._sync_start_pending:
+            QTimer.singleShot(0, self._start_sync)
+
+    def _start_sync(self) -> None:
+        if not self._sync_start_pending:
+            return                      # уже запускались (краска и страховка — вдвоём)
+        self._sync_start_pending = False
         if config.sync_enabled():
             self.sync.start()
 
@@ -107,7 +153,7 @@ class MainWindow(QMainWindow):
     def _show_calendar(self) -> None:
         self.sidebar.select_folder(None)
         self.calendar_page.reload()
-        self.stack.setCurrentIndex(1)
+        self.stack.setCurrentWidget(self.calendar_page)
 
     # --- перенос заметок и навигация по ссылкам ---
 
@@ -226,7 +272,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Импорт", f"Не удалось импортировать: {e}")
             return
         self._reload_folders()
-        self.calendar_page.reload()
+        if self._calendar is not None:
+            self._calendar.reload()
         QMessageBox.information(self, "Импорт", f"Импортировано файлов: {count}.")
 
     def _on_settings(self) -> None:
@@ -263,7 +310,8 @@ class MainWindow(QMainWindow):
         self.sidebar.set_folders(folders)  # F2: diff-update, выделение сохраняется
         if cur_id:
             self.sidebar.select_folder(cur_id)
-        self.calendar_page.reload()
+        if self._calendar is not None:      # не открывали — загрузит свежее при открытии
+            self._calendar.reload()
         if cur_id is None:
             return
         if cur_id in self._folders:
@@ -272,10 +320,11 @@ class MainWindow(QMainWindow):
             self.chat.show_folder(None)  # папку удалили синком
 
     def closeEvent(self, e):  # noqa: N802
-        try:
-            self.sync.stop()
-        except Exception:  # noqa: BLE001
-            pass
+        if self._sync is not None:      # синк могли так и не создать (не трогаем импорт)
+            try:
+                self._sync.stop()
+            except Exception:  # noqa: BLE001
+                pass
         super().closeEvent(e)
 
 
