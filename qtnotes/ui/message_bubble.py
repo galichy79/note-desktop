@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -19,7 +18,6 @@ from PySide6.QtGui import (
     QColor,
     QDesktopServices,
     QGuiApplication,
-    QImageReader,
     QMovie,
     QPalette,
     QPixmap,
@@ -36,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from .. import dbg
 from ..storage import vault
+from .imageutil import decode_display, full_pixmap, oriented_size
 from .mediamenu import show_media_menu
 from .textutils import colorize_links, linkify_references, strip_theme_overrides
 from .theme import PALETTE
@@ -98,33 +97,30 @@ class _FileChip(QFrame):
 class _MediaLabel(QLabel):
     """Метка с картинкой/GIF. ПКМ → копировать изображение/файл/путь.
 
-    Картинка для копирования загружается лениво: пузырь мог быть неактивен и
-    пиксмап ещё не декодирован — тогда читаем его с диска по запросу меню.
+    Полный кадр в буфер обмена декодируется ТОЛЬКО когда пункт выбран: раньше он
+    читался до показа меню, и на фото 12 МП меню открывалось через ~200 мс.
     """
 
     def __init__(self, path):
         super().__init__()
         self._path = str(path)
-        self._copy_pixmap = None   # для статичных изображений (когда загружены)
-        self._movie = None         # для GIF (берём текущий кадр)
+        self._display_pixmap = None   # уменьшенный кадр, который сейчас на экране
+        self._movie = None            # для GIF (берём текущий кадр)
 
     def contextMenuEvent(self, event):  # noqa: N802
-        # Диагностика: путь с ленивым декодом картинки — единственное место, где
-        # заметна слабая машина (декод крупного фото идёт до показа меню).
-        cached = self._movie is not None or self._copy_pixmap is not None
-        t0 = time.perf_counter()
-        if self._movie is not None:
-            pm = self._movie.currentPixmap()
-        elif self._copy_pixmap is not None:
-            pm = self._copy_pixmap
-        else:
-            pm = QPixmap(self._path)   # ленивая загрузка для копирования
-            if pm.isNull():
-                pm = None
-        dbg.log("ctx", where="media_img", cached=cached,
-                decode_ms=f"{(time.perf_counter() - t0) * 1000:.1f}",
+        # Проверка «есть ли что копировать» — только заголовок файла (0,1 мс),
+        # а не декод: он и был причиной медленного меню.
+        has_image = self._movie is not None or oriented_size(self._path)[0] > 0
+        dbg.log("ctx", where="media_img", loaded=self._display_pixmap is not None,
                 wait_ms=dbg.fmt_ms(dbg.press_wait()))
-        show_media_menu(self, event.globalPos(), self._path, pm, where="media_img")
+        show_media_menu(self, event.globalPos(), self._path, where="media_img",
+                        image_loader=self._full_pixmap if has_image else None)
+
+    def _full_pixmap(self) -> QPixmap:
+        """Полный кадр для буфера обмена (для GIF — текущий кадр)."""
+        if self._movie is not None:
+            return self._movie.currentPixmap()
+        return full_pixmap(self._path)
 
 
 class _NoteText(QLabel):
@@ -216,7 +212,7 @@ class MessageBubble(QWidget):
         if not slot["loaded"]:
             return
         if slot["kind"] == "image":
-            pm = widget._copy_pixmap
+            pm = widget._display_pixmap
             if pm is not None and not pm.isNull():
                 widget.setPixmap(pm.scaledToWidth(w, Qt.SmoothTransformation)
                                  if pm.width() > w else pm)
@@ -252,11 +248,15 @@ class MessageBubble(QWidget):
         kind = slot["kind"]
         if kind == "image":
             lbl = slot["widget"]
-            pm = QPixmap(slot["path"])
+            # Декод СРАЗУ уменьшенным, но во всю ширину, которую лента может
+            # показать (IMG_MAX_W), а не в текущую: пузырь расширяется вместе с
+            # окном, и тогда картинку пришлось бы растягивать из мелкой копии
+            # (мягко). Полный кадр 12 МП стоил ~200 мс фриза UI и ~50 МБ.
+            pm = decode_display(slot["path"], IMG_MAX_W)
             if not pm.isNull():
                 lbl.setPixmap(pm.scaledToWidth(w, Qt.SmoothTransformation)
                               if pm.width() > w else pm)
-                lbl._copy_pixmap = pm
+                lbl._display_pixmap = pm
             else:
                 lbl.setText("[изображение недоступно]")
         elif kind == "gif":
@@ -282,7 +282,7 @@ class MessageBubble(QWidget):
         if kind == "image":
             lbl = slot["widget"]
             lbl.clear()
-            lbl._copy_pixmap = None
+            lbl._display_pixmap = None
         elif kind == "gif":
             lbl = slot["widget"]
             movie = slot.get("movie")
@@ -325,12 +325,16 @@ class MessageBubble(QWidget):
     # --- отрисовка ---
 
     def _dims(self, att, path) -> tuple[int, int]:
-        """Размеры изображения: из вложения, иначе из заголовка файла (дёшево)."""
+        """Размеры изображения С УЧЁТОМ EXIF-ориентации — из заголовка файла (дёшево).
+
+        Раньше первыми брались сохранённые att.w/h: они записаны без применения
+        ориентации (её не делает ни QImage, ни QPixmap), и у фото с камеры
+        заглушка оказывалась повёрнутой относительно картинки."""
+        w, h = oriented_size(path)
+        if w and h:
+            return w, h
         if att.w > 0 and att.h > 0:
             return att.w, att.h
-        size = QImageReader(str(path)).size()
-        if size.isValid():
-            return size.width(), size.height()
         return 0, 0
 
     def render_note(self) -> None:

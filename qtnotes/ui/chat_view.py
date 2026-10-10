@@ -28,6 +28,7 @@ from ..storage import vault
 from ..storage.models import Attachment, Note, new_id
 from . import anim
 from .graphics import attach_icon, search_icon
+from .imageutil import decode_display, oriented_size
 from .message_bubble import MessageBubble
 from .rich_input import RichTextEdit, build_format_toolbar, image_from_mime
 from .textutils import linkify_plain, linkify_references
@@ -92,8 +93,14 @@ def _build_pending_note(folder_id, pending, caption_plain, caption_html):
                 continue
             att = Attachment(file=sp.name, mime=mime, name=sp.name, size=sp.stat().st_size)
             if mime.startswith("image/"):
-                img = QImage(str(dest))
-                att.w, att.h = img.width(), img.height()
+                # размеры — с EXIF-ориентацией: QImage её не применяет, и фото с
+                # камеры (Orientation=6) сохраняло перевёрнутые w/h, из-за чего
+                # заглушка в ленте не совпадала с картинкой
+                w, h = oriented_size(dest)
+                if not w or not h:
+                    img = QImage(str(dest))
+                    w, h = img.width(), img.height()
+                att.w, att.h = w, h
                 images += 1
             elif mime.startswith("video/"):
                 videos += 1
@@ -979,7 +986,9 @@ class ChatView(QWidget):
             if it["type"] == "image":
                 pm = QPixmap.fromImage(it["image"])
             else:
-                pm = QPixmap(it["path"])
+                # миниатюра 44x44: декодируем сразу уменьшенным + с EXIF (иначе
+                # на фото 12 МП лоток замирал на ~200 мс, а кадр шёл боком)
+                pm = decode_display(it["path"], 88)
             if not pm.isNull():
                 thumb.setPixmap(pm.scaled(44, 44, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
             thumb.setFixedSize(44, 44)
