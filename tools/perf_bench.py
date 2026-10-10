@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -305,38 +306,88 @@ def section_startup(runs: int) -> None:
     print("=" * 96)
     print("4. ЗАПУСК: фазы старта (в отдельном процессе, как в жизни)")
     print("=" * 96)
-    code = (
-        "import os, sys, time;"
-        "os.environ.setdefault('QT_QPA_PLATFORM','offscreen');"
-        f"sys.path.insert(0, {str(ROOT)!r});"
-        "t0=time.perf_counter();"
-        "from PySide6.QtWidgets import QApplication;"
-        "app=QApplication([]);"
-        "t1=time.perf_counter();"
-        "from qtnotes.ui.theme import build_qss;"
-        "from qtnotes.ui.main_window import MainWindow, apply_font;"
-        "t2=time.perf_counter();"
-        "app.setStyleSheet(build_qss()); apply_font(app);"
-        "t3=time.perf_counter();"
-        "print(f'{(t1-t0)*1000:.1f} {(t2-t1)*1000:.1f} {(t3-t2)*1000:.1f} {(t3-t0)*1000:.1f}')"
-    )
+    # Изолированные vault/config/cache: старт меряется на пустом хранилище с
+    # выключенным синком — живой vault и движок не трогаем.
+    base = tempfile.mkdtemp(prefix="qtnotes-bench-boot-")
+    env = dict(os.environ,
+               QT_QPA_PLATFORM="offscreen",
+               QTNOTES_VAULT=f"{base}/vault",
+               XDG_CONFIG_HOME=f"{base}/cfg",
+               XDG_CACHE_HOME=f"{base}/cache")
+    # Отдельный файл, а не `-c`: многострочный код с классом и циклом в одну
+    # строку не влезает без ловушек с отступами.
+    probe = Path(base) / "boot_probe.py"
+    probe.write_text(f'''
+"""Замер фаз старта: от запуска процесса до первого кадра окна."""
+import sys, time
+sys.path.insert(0, {str(ROOT)!r})
+t0 = time.perf_counter()
+from PySide6.QtWidgets import QApplication
+app = QApplication([])
+t1 = time.perf_counter()
+from qtnotes.ui.fonts import ensure_emoji_font
+ensure_emoji_font()
+from qtnotes.ui.theme import build_qss
+from qtnotes.ui.main_window import MainWindow, apply_font
+t2 = time.perf_counter()
+app.setStyleSheet(build_qss())
+apply_font(app)
+t3 = time.perf_counter()
+
+from PySide6.QtCore import QEvent, QObject
+
+
+class Watch(QObject):
+    """Ловит первую отрисовку окна: по ней видно, когда окно реально на экране."""
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Paint and obj is win and not painted:
+            painted.append(time.perf_counter())
+        return False
+
+
+painted = []
+win = MainWindow()
+t4 = time.perf_counter()
+watch = Watch()          # ссылку ДЕРЖИМ: PySide6 не владеет объектом фильтра
+win.installEventFilter(watch)
+win.show()
+t5 = time.perf_counter()
+deadline = time.monotonic() + 5
+while not painted and time.monotonic() < deadline:
+    app.processEvents()
+    time.sleep(0.005)
+t6 = time.perf_counter()
+print(f"{{(t1 - t0) * 1000:.1f}} {{(t2 - t1) * 1000:.1f}} {{(t3 - t2) * 1000:.1f}} "
+      f"{{(t4 - t3) * 1000:.1f}} {{(t5 - t4) * 1000:.1f}} {{(t6 - t0) * 1000:.1f}} "
+      f"{{len(painted)}}")
+''', encoding="utf-8")
     times = []
     for _ in range(runs):
-        out = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                             text=True, timeout=300)
+        out = subprocess.run([sys.executable, str(probe)], capture_output=True,
+                             text=True, timeout=300, env=env)
         if out.returncode != 0:
-            print(f"[!] старт не удалось замерить: {out.stderr.strip()[:200]}")
+            print(f"[!] старт не удалось замерить: {out.stderr.strip()[:300]}")
+            shutil.rmtree(base, ignore_errors=True)
             return
         times.append([float(x) for x in out.stdout.split()])
     qt = statistics.median(t[0] for t in times)
     mods = statistics.median(t[1] for t in times)
     qss = statistics.median(t[2] for t in times)
-    total = statistics.median(t[3] for t in times)
+    win_ms = statistics.median(t[3] for t in times)
+    show_ms = statistics.median(t[4] for t in times)
+    total = statistics.median(t[5] for t in times)
+    painted = min(t[6] for t in times)
     print(f"{'  QApplication (импорт PySide6 + окно-обвязка)':62s} {qt:8.1f} ms")
     print(f"{'  импорт модулей qtnotes.ui':62s} {mods:8.1f} ms")
     print(f"{'  тема (build_qss + шрифт)':62s} {qss:8.1f} ms")
-    note_result("startup_ms", "  ИТОГО до готового окна (без разблокировки)",
+    print(f"{'  MainWindow() — постройка окна':62s} {win_ms:8.1f} ms")
+    print(f"{'  show()':62s} {show_ms:8.1f} ms")
+    if not painted:
+        print("  [!] окно не отрисовалось за 5 с — ИТОГО ниже не о появлении окна")
+    note_result("startup_ms", "  ИТОГО до ПЕРВОГО КАДРА окна (без разблокировки)",
                 total)
+    shutil.rmtree(base, ignore_errors=True)
     print()
 
 
