@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCursor, QFont
+from PySide6.QtGui import QCursor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -66,6 +66,9 @@ class MainWindow(QMainWindow):
         self.chat.moveNotesRequested.connect(self._on_move_notes)
         self.chat.noteReferenceActivated.connect(self._on_reference)
 
+        # F11 — полноэкранный режим, как в терминале: повторное нажатие возвращает окно.
+        QShortcut(QKeySequence(Qt.Key_F11), self, self.toggle_fullscreen)
+
         # Загрузка папок из хранилища.
         self._folders: dict[str, object] = {}
         self._reload_folders()
@@ -125,6 +128,11 @@ class MainWindow(QMainWindow):
         self._sync_start_pending = False
         if config.sync_enabled():
             self.sync.start()
+
+    def toggle_fullscreen(self) -> None:
+        # Переключаем только флаг полноэкранности: остальное состояние (развёрнуто ли
+        # окно) сохраняется, и выход возвращает окно таким, каким оно было до F11.
+        self.setWindowState(self.windowState() ^ Qt.WindowFullScreen)
 
     @staticmethod
     def _placeholder(text: str) -> QWidget:
