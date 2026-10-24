@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .ui.main_window import MainWindow, apply_font
@@ -27,6 +29,9 @@ def run() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("QtNotes")
+    # иконка окна для панели/дока и связка с qtnotes.desktop (та же, что у note-mobile)
+    app.setDesktopFileName("qtnotes")
+    app.setWindowIcon(QIcon(str(Path(__file__).parent / "resources" / "icon.png")))
     _install_ru_translation(app)
     app.setStyleSheet(build_qss())
     apply_font(app)
