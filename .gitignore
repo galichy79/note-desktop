@@ -30,3 +30,6 @@ tests/golden/conv_out.json
 
 # Local machine config
 .claude/
+
+# Notes export archive: contains notes in plain text
+qtnotes_backup.zip
