@@ -53,6 +53,10 @@ class SyncDialog(QDialog):
         self._qr_hint.hide()
         root.addWidget(self._qr_hint)
 
+        transfer_btn = QPushButton("Подключить другой компьютер (по коду)")
+        transfer_btn.clicked.connect(self._on_transfer)
+        root.addWidget(transfer_btn)
+
         root.addWidget(QLabel("Сопряжённые устройства:"))
         self._list = QListWidget()
         root.addWidget(self._list, 1)
@@ -161,6 +165,16 @@ class SyncDialog(QDialog):
         self._refresh_devices()
         self._refresh_status()
         QMessageBox.information(self, "Сопряжение", f"Устройство «{name}» сопряжено.")
+
+    def _on_transfer(self) -> None:
+        from .transfer_dialog import TransferDialog
+        self._hide_qr()
+        TransferDialog(self._mgr, self).exec()
+        # диалог мог включить синхронизацию и добавить устройство
+        self._update_toggle_btn()
+        self._update_controls()
+        self._refresh_devices()
+        self._refresh_status()
 
     # --- список устройств ---
 

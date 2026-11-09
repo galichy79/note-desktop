@@ -164,13 +164,14 @@ def parse_service_info(info, our_device_id: str) -> FoundPeer | None:
                      host=host, port=port)
 
 
-def build_service_info(identity, port: int, ip: str | None = None) -> ServiceInfo:
+def build_service_info(identity, port: int, ip: str | None = None,
+                       service_type: str = SERVICE_TYPE) -> ServiceInfo:
     # I5: если IP не задан явно — анонсируем ВСЕ пригодные адреса (multi-homed/VPN).
     ips = [ip] if ip else _all_ips()
-    name = f"{identity.device_id}.{SERVICE_TYPE}"
+    name = f"{identity.device_id}.{service_type}"
     server = f"qtnotes-{identity.device_id}.local."
     props = {b"id": identity.device_id.encode(), b"name": identity.name.encode()}
-    return ServiceInfo(SERVICE_TYPE, name,
+    return ServiceInfo(service_type, name,
                        addresses=[socket.inet_aton(a) for a in ips],
                        port=port, properties=props, server=server)
 

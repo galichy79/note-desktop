@@ -111,6 +111,7 @@ class Sidebar(QFrame):
     newFolderRequested = Signal()
     importRequested = Signal()
     exportAllRequested = Signal()
+    transferRequested = Signal()
     calendarRequested = Signal()
     settingsRequested = Signal()
 
@@ -145,6 +146,9 @@ class Sidebar(QFrame):
         act_new.triggered.connect(self.newFolderRequested.emit)
         menu.addAction(act_new)
         menu.addSeparator()
+        act_transfer = QAction("Перенос заметок между ПК…", menu)
+        act_transfer.triggered.connect(self.transferRequested.emit)
+        menu.addAction(act_transfer)
         act_import = QAction("Импортировать архив…", menu)
         act_import.triggered.connect(self.importRequested.emit)
         menu.addAction(act_import)

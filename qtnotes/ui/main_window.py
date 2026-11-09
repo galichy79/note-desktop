@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         self.sidebar.folderExportRequested.connect(self._on_export_folder)
         self.sidebar.importRequested.connect(self._on_import)
         self.sidebar.exportAllRequested.connect(self._on_export_all)
+        self.sidebar.transferRequested.connect(self._on_transfer)
 
         # Сигналы ленты.
         self.chat.moveNotesRequested.connect(self._on_move_notes)
@@ -242,6 +243,10 @@ class MainWindow(QMainWindow):
             if self.chat._current_folder and self.chat._current_folder.id == folder_id:
                 self.chat.show_folder(None)
             self._reload_folders()
+
+    def _on_transfer(self) -> None:
+        from .transfer_dialog import TransferDialog
+        TransferDialog(self.sync, self).exec()
 
     # --- экспорт / импорт ---
 

@@ -34,6 +34,7 @@ optional local-encryption layer protects the vault at rest behind a PIN.
 
 - Direct device-to-device over **mutual-TLS** with certificate pinning.
 - **mDNS** discovery on the local network + **QR pairing** (one-shot, TTL-limited).
+- **PC-to-PC transfer with a 6-digit code**, confirmed by comparing a check number on both screens.
 - Conflict resolution via an append-only **operation log** with **version vectors**
   and last-writer-wins by modification time; deletions are tombstoned.
 - A cross-language **conformance test suite** pins the wire/crypto/merge semantics so
